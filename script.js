@@ -1,12 +1,13 @@
 // ==========================================================
 //                     الإعدادات الرئيسية
 // ==========================================================
-// (ضع رابط الـ API الخاص بك هنا)
-const API_URL = 'https://script.google.com/macros/s/AKfycbwLJmxPFCzZuQOIpMiwZpMsgljALygLfMbU-eY1fY8uJ54jtkslesU2KjfWSmZZQpb6/exec'; 
+// !!! تنبيه هام: هذا هو رابط النشر الجديد الذي زودتني به
+const API_URL = 'https://script.google.com/macros/s/AKfycbx8xsJMMZe5bEDo7-bq9AzuzLW1dgJc2EsdJhdmWA80iYVwsvgSxYsoLplKBgx_w0hf/exec'; 
 
 // ==========================================================
-//                   دوال الأمان
+//                   دوال الأمان (جديد)
 // ==========================================================
+// دالة لتشفير كلمة المرور في متصفح المستخدم قبل إرسالها للخادم
 async function hashPassword(password) {
     const encoder = new TextEncoder();
     const data = encoder.encode(password);
@@ -16,6 +17,7 @@ async function hashPassword(password) {
     return hashHex;
 }
 
+// (جديد) تعريف أسماء الصفحات لمطابقة الخادم
 const SHEETS = {
   USERS: 'المستخدمون',
   GRADES: 'الدرجات_2025_2026',
@@ -49,7 +51,7 @@ window.alert = function(message) {
     if (message.includes('خطأ') || message.includes('فشل') || message.includes('الرجاء') || message.includes('غير صحيح') || message.includes('لم يتم') || message.includes('لا يوجد')) {
         iconType = 'error';
         titleText = 'تنبيه';
-        btnColor = '#dc3545';
+        btnColor = '#dc3545'; 
     }
 
     Swal.fire({
@@ -106,27 +108,58 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 function handleLoginPage() {
+    // (ميزة تذكرني): إذا كان المستخدم مسجلاً مسبقاً، سيتم توجيهه مباشرة للوحة دون الحاجة لكتابة الباسورد
+    const savedUser = JSON.parse(localStorage.getItem('userData'));
+    if (savedUser && savedUser.role) {
+        switch(savedUser.role) {
+            case 'إداري': window.location.href = 'AdminInterface.html'; return;
+            case 'مدرس': window.location.href = 'TeacherInterface.html'; return;
+            case 'طالب': window.location.href = 'StudentInterface.html'; return;
+        }
+    }
+
     const loginForm = document.getElementById('loginForm');
     if (!loginForm) return;
+    
     loginForm.addEventListener('submit', async (e) => {
         e.preventDefault();
         const email = document.getElementById('email').value;
         const password = document.getElementById('password').value;
-        document.getElementById('message').textContent = 'جاري التحقق...';
+        const submitBtn = loginForm.querySelector('button[type="submit"]');
+        const messageEl = document.getElementById('message');
+        
+        // تعطيل الزر وإظهار حالة التحميل
+        submitBtn.disabled = true;
+        submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> جاري التحقق...';
+        messageEl.textContent = '';
         
         const hashedPassword = await hashPassword(password);
+        
         const result = await callApi('login', { email, password: hashedPassword });
         
         if (result.success) {
+            // حفظ البيانات (ميزة تذكرني)
             localStorage.setItem('userData', JSON.stringify(result.user));
             switch(result.user.role) {
                 case 'إداري': window.location.href = 'AdminInterface.html'; break;
                 case 'مدرس': window.location.href = 'TeacherInterface.html'; break;
                 case 'طالب': window.location.href = 'StudentInterface.html'; break;
-                default: document.getElementById('message').textContent = 'دور المستخدم غير معروف.';
+                default: 
+                    messageEl.textContent = 'دور المستخدم غير معروف.';
+                    submitBtn.disabled = false;
+                    submitBtn.innerHTML = 'تسجيل الدخول';
             }
         } else {
-            document.getElementById('message').textContent = result.message || 'خطأ في تسجيل الدخول';
+            // إرجاع الزر لحالته الطبيعية وإظهار الخطأ بشكل واضح وصريح
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = 'تسجيل الدخول';
+            messageEl.textContent = result.message || 'كلمة المرور أو البريد غير صحيح';
+            messageEl.style.color = 'red';
+            
+            // إظهار نافذة منبثقة (SweetAlert) للخطأ
+            if (typeof Swal !== 'undefined') {
+                Swal.fire('خطأ في الدخول', result.message || 'تأكد من البريد الإلكتروني وكلمة المرور', 'error');
+            }
         }
     });
 }
@@ -174,6 +207,7 @@ async function loadAndCheckProfile() {
     const res = await callApi('getMyProfile');
     if (res.success) {
         const p = res.profile;
+        
         if(document.getElementById('profFullName')) document.getElementById('profFullName').value = p.fullName || '';
         if(document.getElementById('profMotherName')) document.getElementById('profMotherName').value = p.motherName || '';
         if(document.getElementById('profStudentPhone')) document.getElementById('profStudentPhone').value = p.studentPhone || '';
@@ -198,6 +232,378 @@ async function loadAndCheckProfile() {
         }
     }
 }
+
+// ==========================================================
+//                 واجهة الجدول الذكي الآلي
+// ==========================================================
+
+let allTeacherConstraints = [];
+let generatedScheduleResult = null;
+
+// يتم استدعاؤها من داخل handleAdminPage لإعداد القوائم
+async function initSmartTimetable() {
+    const resUsers = await callApi('getAllUsers');
+    if (resUsers.success) {
+        const teachers = resUsers.users.filter(u => u.role === 'مدرس');
+        const select = document.getElementById('stTeacherSelect');
+        if (select) {
+            select.innerHTML = '<option value="">-- اختر المدرس لتحديد أوقاته --</option>' + 
+                               teachers.map(t => `<option value="${t.userId}">${t.fullName}</option>`).join('');
+        }
+    }
+
+    const resCons = await callApi('getTeacherConstraints');
+    if (resCons.success) {
+        allTeacherConstraints = resCons.constraints;
+    }
+
+    // بناء شبكة الأيام
+    const daysGrid = document.getElementById('stDaysGrid');
+    if (daysGrid) {
+        const days = ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس'];
+        let html = '';
+        days.forEach(day => {
+            html += `<div style="display: flex; align-items: center; border-bottom: 1px solid #ccc; padding-bottom: 5px;">
+                        <strong style="width: 80px;">${day}:</strong>
+                        <div style="display: flex; gap: 10px;">
+                            ${[1,2,3,4,5,6].map(p => `<label><input type="checkbox" class="st-period-cb" data-day="${day}" value="${p}"> د${p}</label>`).join('')}
+                        </div>
+                     </div>`;
+        });
+        daysGrid.innerHTML = html;
+    }
+
+    // تعبئة فلتر عرض الجدول المولد
+    if (window.academicStructure && window.academicStructure.classes) {
+        populateSelect('stClassFilter', window.academicStructure.classes, '-- اختر الصف لعرض جدوله --');
+    }
+}
+
+// دالة لجلب قيود المدرس عند اختياره
+function loadSpecificTeacherConstraints() {
+    const tId = document.getElementById('stTeacherSelect').value;
+    const container = document.getElementById('stAvailabilityContainer');
+    if (!tId) { container.style.display = 'none'; return; }
+    
+    container.style.display = 'block';
+    const tData = allTeacherConstraints.find(c => c.teacherId === tId);
+    
+    document.getElementById('stMaxPeriods').value = tData ? tData.maxPeriods : 20;
+    
+    // الافتراضي (إذا لم يتم التحديد مسبقاً) هو أن جميع الأيام والدروس متاحة (checked)
+    document.querySelectorAll('.st-period-cb').forEach(cb => {
+        const day = cb.dataset.day;
+        const period = parseInt(cb.value);
+        if (tData && tData.availability[day]) {
+            cb.checked = tData.availability[day].includes(period);
+        } else {
+            cb.checked = true; 
+        }
+    });
+}
+
+// دالة لحفظ القيود
+async function saveSTConstraints() {
+    const tId = document.getElementById('stTeacherSelect').value;
+    if (!tId) return;
+
+    Swal.fire({ title: 'جاري الحفظ...', allowOutsideClick: false, didOpen: () => { Swal.showLoading(); } });
+
+    let availability = {};
+    const days = ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس'];
+    days.forEach(d => availability[d] = []);
+
+    document.querySelectorAll('.st-period-cb:checked').forEach(cb => {
+        availability[cb.dataset.day].push(parseInt(cb.value));
+    });
+
+    const payload = {
+        teacherId: tId,
+        maxPeriods: parseInt(document.getElementById('stMaxPeriods').value),
+        availability: availability
+    };
+
+    const res = await callApi('saveTeacherConstraints', payload);
+    if (res.success) {
+        Swal.fire('نجاح', res.message, 'success');
+        // تحديث المصفوفة المحلية لتجنب إعادة التحميل
+        const idx = allTeacherConstraints.findIndex(c => c.teacherId === tId);
+        if (idx > -1) { allTeacherConstraints[idx] = { ...payload, teacherName: allTeacherConstraints[idx].teacherName }; }
+        else { allTeacherConstraints.push(payload); }
+    }
+}
+
+// ==========================================================
+//        محرك الجدول الذكي - الواجهة الشاملة (Matrix)
+// ==========================================================
+
+let globalTimetableData = null; 
+let globalTeacherQuotas = {}; // { teacherId: { name, max, count } }
+let selectedCellForSwap = null; // للاحتفاظ بالخلية المحددة للتبديل
+
+// 1. توليد الجدول
+async function generateSmartTimetableUI() {
+    Swal.fire({ title: 'جاري التحليل وبناء الجدول الشامل...', allowOutsideClick: false, didOpen: () => { Swal.showLoading(); } });
+    
+    const res = await callApi('generateSmartTimetable');
+    if (res.success) {
+        globalTimetableData = res.schedule;
+        
+        // تجهيز بيانات النصاب مبدئياً
+        globalTeacherQuotas = {};
+        allTeacherConstraints.forEach(c => {
+            globalTeacherQuotas[c.teacherId] = { name: c.teacherName, max: c.maxPeriods, count: 0 };
+        });
+
+        Swal.fire('تم التوليد!', 'تم بناء الجدول الشامل. يمكنك الآن التعديل والتبديل بين الحصص بالضغط عليها.', 'success');
+        renderTimetableMatrix();
+    } else {
+        Swal.fire('خطأ', res.message, 'error');
+    }
+}
+
+// 2. رسم الجدول الشامل (Matrix)
+function renderTimetableMatrix() {
+    const container = document.getElementById('stGeneratedTimetableContainer');
+    if (!globalTimetableData) return;
+
+    // استخراج جميع الشعب المشاركة لبناء الأعمدة
+    const classKeys = Object.keys(globalTimetableData).sort(); 
+    const days = ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس'];
+    
+    let html = `<table class="matrix-table" id="masterTimetableElement">
+                    <thead>
+                        <tr>
+                            <th style="width: 120px;">اليوم / الدرس</th>`;
+    
+    classKeys.forEach(ck => { html += `<th>${ck.replace('-', ' ')}</th>`; });
+    html += `           </tr>
+                    </thead>
+                    <tbody>`;
+
+    days.forEach(day => {
+        // سطر عنوان اليوم (مدمج عبر كل الأعمدة)
+        html += `<tr><td class="day-row-header" colspan="${classKeys.length + 1}">${day}</td></tr>`;
+        
+        for (let period = 1; period <= 6; period++) {
+            html += `<tr>
+                        <td class="period-col-header">الدرس ${period}</td>`;
+            
+            classKeys.forEach(ck => {
+                const lessonData = globalTimetableData[ck][day] ? globalTimetableData[ck][day][`lesson${period}`] : null;
+                const cellId = `${ck}|${day}|lesson${period}`;
+                
+                if (lessonData) {
+                    html += `<td id="${cellId}" 
+                                 onclick="handleTimetableCellClick('${ck}', '${day}', 'lesson${period}')"
+                                 data-teacher-id="${lessonData.teacherId}">
+                                <span class="subject-name">${lessonData.subject}</span><br>
+                                <span class="teacher-name">${lessonData.teacherName}</span>
+                             </td>`;
+                } else {
+                    html += `<td id="${cellId}" onclick="handleTimetableCellClick('${ck}', '${day}', 'lesson${period}')" data-teacher-id="">
+                                <span style="color:#ccc;">فارغ</span>
+                             </td>`;
+                }
+            });
+            html += `</tr>`;
+        }
+    });
+
+    html += `</tbody></table>`;
+    container.innerHTML = html;
+    
+    // إظهار عنوان الطباعة
+    document.querySelector('.print-title').style.display = 'block';
+
+    // بعد الرسم، نفحص التضارب ونحدث النصاب
+    checkConflictsAndUpdateQuota();
+}
+
+// 3. التبديل التفاعلي بين الخلايا
+function handleTimetableCellClick(classKey, day, lesson) {
+    const cellId = `${classKey}|${day}|${lesson}`;
+    const tdElement = document.getElementById(cellId);
+
+    if (!selectedCellForSwap) {
+        // التحديد الأول
+        selectedCellForSwap = { classKey, day, lesson, element: tdElement };
+        tdElement.classList.add('selected');
+    } else {
+        // التحديد الثاني (عملية التبديل)
+        if (selectedCellForSwap.classKey === classKey && selectedCellForSwap.day === day && selectedCellForSwap.lesson === lesson) {
+            // إلغاء التحديد إذا ضغط على نفس الخلية
+            tdElement.classList.remove('selected');
+            selectedCellForSwap = null;
+            return;
+        }
+
+        // تبديل البيانات في الكائن البرمجي
+        const val1 = globalTimetableData[selectedCellForSwap.classKey][selectedCellForSwap.day][selectedCellForSwap.lesson];
+        const val2 = globalTimetableData[classKey][day][lesson];
+
+        globalTimetableData[selectedCellForSwap.classKey][selectedCellForSwap.day][selectedCellForSwap.lesson] = val2;
+        globalTimetableData[classKey][day][lesson] = val1;
+
+        // إعادة رسم الجدول بالكامل بعد التبديل لضمان الدقة
+        selectedCellForSwap = null;
+        renderTimetableMatrix();
+    }
+}
+
+// 4. كشف التضارب وتحديث تقرير النصاب
+function checkConflictsAndUpdateQuota() {
+    let hasConflict = false;
+    const days = ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس'];
+    const classKeys = Object.keys(globalTimetableData);
+    
+    // تصفير عدادات النصاب
+    for (let tId in globalTeacherQuotas) { globalTeacherQuotas[tId].count = 0; }
+
+    // إزالة التلوين الأحمر السابق
+    document.querySelectorAll('.matrix-table td.conflict').forEach(td => td.classList.remove('conflict'));
+
+    days.forEach(day => {
+        for (let period = 1; period <= 6; period++) {
+            const teachersInThisPeriod = {}; // { teacherId: [cellId1, cellId2] }
+
+            classKeys.forEach(ck => {
+                const lesson = globalTimetableData[ck][day][`lesson${period}`];
+                if (lesson && lesson.teacherId) {
+                    // تحديث النصاب
+                    if (globalTeacherQuotas[lesson.teacherId]) {
+                        globalTeacherQuotas[lesson.teacherId].count++;
+                    } else {
+                        // إذا كان المدرس غير موجود في القيود، نضيفه مبدئياً
+                        globalTeacherQuotas[lesson.teacherId] = { name: lesson.teacherName, max: 20, count: 1 };
+                    }
+
+                    // فحص التضارب الأفقي (نفس الدرس في نفس اليوم لصفوف مختلفة)
+                    if (!teachersInThisPeriod[lesson.teacherId]) {
+                        teachersInThisPeriod[lesson.teacherId] = [];
+                    }
+                    teachersInThisPeriod[lesson.teacherId].push(`${ck}|${day}|lesson${period}`);
+                }
+            });
+
+            // تلوين الخلايا المتضاربة
+            for (let tId in teachersInThisPeriod) {
+                if (teachersInThisPeriod[tId].length > 1) {
+                    hasConflict = true;
+                    teachersInThisPeriod[tId].forEach(cellId => {
+                        const td = document.getElementById(cellId);
+                        if (td) td.classList.add('conflict');
+                    });
+                }
+            }
+        }
+    });
+
+    // إظهار أو إخفاء رسالة التضارب
+    document.getElementById('stConflictAlert').style.display = hasConflict ? 'block' : 'none';
+
+    // تحديث واجهة النصاب (الباجات)
+    const quotaContainer = document.getElementById('stQuotaReportContainer');
+    const quotaList = document.getElementById('stQuotaList');
+    quotaContainer.style.display = 'block';
+    
+    let quotaHtml = '';
+    for (let tId in globalTeacherQuotas) {
+        const q = globalTeacherQuotas[tId];
+        let badgeClass = 'quota-ok';
+        if (q.count < q.max) badgeClass = 'quota-under';
+        if (q.count > q.max) badgeClass = 'quota-over';
+        
+        quotaHtml += `<span class="quota-badge ${badgeClass}">${q.name}: ${q.count}/${q.max}</span>`;
+    }
+    quotaList.innerHTML = quotaHtml;
+}
+
+// 5. اعتماد الجدول وتوزيعه
+async function publishSmartSchedule() {
+    if (!globalTimetableData) return alert('الرجاء توليد أو تحميل جدول أولاً.');
+    
+    // التحقق من عدم وجود تضارب قبل الحفظ
+    if (document.getElementById('stConflictAlert').style.display === 'block') {
+        const confirmSave = await Swal.fire({
+            title: 'تحذير تضارب!',
+            text: 'يوجد مدرسون لديهم أكثر من حصة في نفس الوقت. هل أنت متأكد أنك تريد الاعتماد والنشر بوجود هذا الخطأ؟',
+            icon: 'warning',
+            showCancelButton: true,
+            confirmButtonColor: '#dc3545',
+            cancelButtonColor: '#6c757d',
+            confirmButtonText: 'نعم، انشر على أي حال',
+            cancelButtonText: 'تراجع للتعديل'
+        });
+        if (!confirmSave.isConfirmed) return;
+    }
+
+    const { value: versionName } = await Swal.fire({
+        title: 'اعتماد الجدول وتوزيعه',
+        input: 'text',
+        inputLabel: 'أدخل اسماً لهذه النسخة لحفظها في الأرشيف (مثال: جدول شهر 10)',
+        inputValue: `إصدار ${new Date().toLocaleDateString('ar-IQ')}`,
+        showCancelButton: true,
+        confirmButtonText: 'حفظ ونشر',
+        cancelButtonText: 'إلغاء'
+    });
+
+    if (versionName) {
+        Swal.fire({ title: 'جاري الحفظ والتوزيع...', allowOutsideClick: false, didOpen: () => { Swal.showLoading(); } });
+        
+        const res = await callApi('publishSmartTimetableToWeekly', { 
+            versionName: versionName, 
+            fullSchedule: globalTimetableData 
+        });
+        
+        if (res.success) {
+            Swal.fire('نجاح', res.message, 'success');
+            loadSmartVersionsMenu(); // تحديث قائمة النسخ
+        } else {
+            Swal.fire('خطأ', res.message, 'error');
+        }
+    }
+}
+
+// 6. تحميل قائمة النسخ المحفوظة (الأرشيف)
+async function loadSmartVersionsMenu() {
+    const select = document.getElementById('stVersionsSelect');
+    if (!select) return;
+    
+    const res = await callApi('getSmartTimetableVersions');
+    if (res.success && res.versions) {
+        window.smartTimetableVersionsCache = res.versions; // حفظها محلياً
+        let options = '<option value="">-- تحميل نسخة محفوظة سابقة --</option>';
+        res.versions.forEach(v => {
+            options += `<option value="${v.versionId}">${v.versionName} (${v.publishDate})</option>`;
+        });
+        select.innerHTML = options;
+    }
+}
+
+// 7. استرجاع نسخة سابقة وعرضها في الماتريكس
+function loadSmartVersion() {
+    const versionId = document.getElementById('stVersionsSelect').value;
+    if (!versionId) return alert('الرجاء اختيار نسخة من القائمة.');
+    
+    const version = window.smartTimetableVersionsCache.find(v => v.versionId === versionId);
+    if (version) {
+        globalTimetableData = version.scheduleData;
+        
+        // تجهيز بيانات النصاب (استرداد المدرسين)
+        globalTeacherQuotas = {};
+        allTeacherConstraints.forEach(c => {
+            globalTeacherQuotas[c.teacherId] = { name: c.teacherName, max: c.maxPeriods, count: 0 };
+        });
+
+        renderTimetableMatrix();
+        Swal.fire('تم الاسترجاع', `تم تحميل: ${version.versionName}`, 'success');
+    }
+}
+
+// أخيراً، يجب تشغيل دالة التهيئة عند فتح صفحة الأدمن:
+// ابحث عن دالة handleAdminPage() في script.js، وأضف هذا السطر في نهايتها:
+// initSmartTimetable();
 
 // ==========================================================
 //                  منطق صفحة الطالب
@@ -232,12 +638,14 @@ function handleStudentPage() {
         reader.readAsDataURL(e.target.files[0]);
     };
 
+    // (إصلاح) تفعيل زر إرسال الاعتراض للطالب
     const objectionForm = document.getElementById('objectionForm');
     if (objectionForm) objectionForm.addEventListener('submit', submitObjectionHandler);
     
     loadStudentObjections();
 }
 
+// (إصلاح) دالة إرسال الاعتراض لمنع تحديث الصفحة
 async function submitObjectionHandler(e) {
     e.preventDefault();
     const payload = {
@@ -252,12 +660,54 @@ async function submitObjectionHandler(e) {
     if (result.success) {
         Swal.fire('نجاح', result.message, 'success');
         e.target.reset();
-        loadStudentObjections(); 
+        loadStudentObjections(); // تحديث القائمة فوراً
+    } else {
+        Swal.fire('خطأ', result.message, 'error');
+    }
+}
+// (جديد) الدالة التي تمنع تحديث الصفحة وترسل الاعتراض للسيرفر
+async function submitObjectionHandler(e) {
+    e.preventDefault(); // هذا السطر هو الذي يمنع الصفحة من التحديث!
+    
+    const payload = {
+        subject: document.getElementById('objSubject').value,
+        content: document.getElementById('objContent').value
+    };
+    
+    if (!payload.subject || !payload.content) return alert('الرجاء إدخال المادة ونص الاعتراض.');
+    
+    Swal.fire({ title: 'جاري الإرسال...', allowOutsideClick: false, didOpen: () => { Swal.showLoading(); } });
+    const result = await callApi('submitObjection', payload);
+    
+    if (result.success) {
+        Swal.fire('نجاح', result.message, 'success');
+        e.target.reset(); // تفريغ الحقول بعد الإرسال
+        loadStudentObjections(); // تحديث الجدول فوراً
     } else {
         Swal.fire('خطأ', result.message, 'error');
     }
 }
 
+// (إصلاح) دالة إرسال الاعتراض لمنع تحديث الصفحة
+async function submitObjectionHandler(e) {
+    e.preventDefault();
+    const payload = {
+        subject: document.getElementById('objSubject').value,
+        content: document.getElementById('objContent').value
+    };
+    if (!payload.subject || !payload.content) return alert('الرجاء إدخال المادة ونص الاعتراض.');
+    
+    Swal.fire({ title: 'جاري الإرسال...', allowOutsideClick: false, didOpen: () => { Swal.showLoading(); } });
+    const result = await callApi('submitObjection', payload);
+    
+    if (result.success) {
+        Swal.fire('نجاح', result.message, 'success');
+        e.target.reset();
+        loadStudentObjections(); // تحديث القائمة فوراً
+    } else {
+        Swal.fire('خطأ', result.message, 'error');
+    }
+}
 async function handleProfileUpdate(e) {
     e.preventDefault();
     Swal.fire({ title: 'جاري الحفظ...', allowOutsideClick: false, didOpen: () => { Swal.showLoading(); } });
@@ -290,7 +740,7 @@ async function handleProfileUpdate(e) {
     
     if (result.success) {
         Swal.fire('تم الحفظ!', 'تم تحديث بيانات ملفك الشخصي وصورتك بنجاح.', 'success');
-        loadAndCheckProfile();
+        loadAndCheckProfile(); 
     } else {
         Swal.fire('خطأ في الحفظ', result.message, 'error');
     }
@@ -405,6 +855,7 @@ function renderHomework(homework) {
         container.innerHTML = '<p>لا توجد واجبات حالياً.</p>';
         return;
     }
+    
     container.innerHTML = homework.map(hw => `
         <div class="card">
             <h4>${hw.subject} <small>(${hw.date})</small></h4>
@@ -521,7 +972,8 @@ function handleTeacherPage() {
                 
                 window.teacherRawAssignments = result.data.rawAssignments || [];
                 
-                const classesOnly = [...new Set(window.teacherRawAssignments.map(a => String(a.class || '').trim()))].filter(c => c !== '');
+                // (إصلاح): نملأ الصفوف فقط في البداية، وباقي القوائم تتحدث عند الاختيار
+                const classesOnly = [...new Set(window.teacherRawAssignments.map(a => a.class))];
                 
                 populateSelect('teacherClasses', classesOnly, '-- اختر الصف --');
                 populateSelect('hwClasses', classesOnly, '-- اختر الصف --');
@@ -529,44 +981,14 @@ function handleTeacherPage() {
                 populateSelect('libClasses', classesOnly, '-- اختر الصف --');
                 populateSelect('absenceClasses', classesOnly, '-- اختر الصف --');
                 populateSelect('masterClass', classesOnly, '-- اختر الصف أولاً --');
-
-                // 💥 ربط التحديث تلقائياً برمجياً لتجاوز أي خطأ أو نقص في الـ HTML
-                ['teacher', 'hw', 'eval', 'lib', 'absence'].forEach(prefix => {
-                    const classEl = document.getElementById(`${prefix}Classes`);
-                    if (classEl) {
-                        classEl.onchange = () => updateTeacherFilters(prefix);
-                    }
-                });
-                const masterEl = document.getElementById('masterClass');
-                if (masterEl) {
-                    masterEl.onchange = () => {
-                        if (typeof updateMasterExcelFilters === 'function') updateMasterExcelFilters();
-                    };
-                }
-
-                // الاختيار التلقائي أو التصفير
-                if (classesOnly.length === 1) {
-                    const singleClass = classesOnly[0];
-                    ['teacher', 'hw', 'eval', 'lib', 'absence'].forEach(prefix => {
-                        const classEl = document.getElementById(`${prefix}Classes`);
-                        if (classEl) {
-                            classEl.value = singleClass;
-                            updateTeacherFilters(prefix); 
-                        }
-                    });
-                    if (masterEl) {
-                        masterEl.value = singleClass;
-                        if (typeof updateMasterExcelFilters === 'function') updateMasterExcelFilters(); 
-                    }
-                } else {
-                    ['teacher', 'hw', 'eval', 'lib', 'absence'].forEach(prefix => {
-                        updateTeacherFilters(prefix);
-                    });
-                }
+                
+                const masterUploadInput = document.getElementById('masterExcelUploadInput');
+                if (masterUploadInput) masterUploadInput.addEventListener('change', handleMasterExcelUpload);
 
                 renderAnnouncements(announcements, 'announcementsContainer');
                 
-                const allTeacherSubjects = [...new Set(window.teacherRawAssignments.map(a => String(a.subject || '').trim()))].filter(s => s !== '');
+                // جلب المواد الخاصة بالمدرس لعرض جدوله
+                const allTeacherSubjects = [...new Set(window.teacherRawAssignments.map(a => a.subject))];
                 renderTeacherWeeklySchedules(weeklySchedules, allTeacherSubjects);
                 
                 const absenceTabButton = document.querySelector('[onclick="showTab(\'absencesTab\')"]');
@@ -601,7 +1023,6 @@ function handleTeacherPage() {
     const loadSentHwBtn = document.getElementById('loadSentHomeworkBtn');
     if(loadSentHwBtn) loadSentHwBtn.addEventListener('click', loadTeacherSentHomework);
 }
-
 async function loadTeacherObjections() {
     const container = document.getElementById('teacherObjectionsContainer');
     if (!container) return;
@@ -684,6 +1105,7 @@ function renderTeacherWeeklySchedules(schedules, teacherSubjects) {
     });
     container.innerHTML = finalHtml;
 }
+
 
 async function loadStudentsForGrading() {
     const payload = {
@@ -778,10 +1200,16 @@ async function submitGradesForReview(e) {
         grades: grades
     };
 
+    // (جديد) إظهار نافذة التحميل لمنع النقر المتكرر وتوضيح أن العملية جارية
+    Swal.fire({ title: 'جاري رفع وحفظ الدرجات...', text: 'الرجاء الانتظار قليلاً وعدم إغلاق النافذة.', allowOutsideClick: false, didOpen: () => { Swal.showLoading(); } });
+
     const result = await callApi('submitGrades', payload);
+    
     if (result.success) {
-        alert(result.message); 
+        Swal.fire('تمت العملية بنجاح', result.message, 'success'); 
         loadStudentsForGrading(); 
+    } else {
+        Swal.fire('خطأ في الحفظ', result.message, 'error');
     }
 }
 
@@ -1081,22 +1509,8 @@ function handleAdminPage() {
             populateSelect('examScheduleClass', window.allClasses, '-- اختر الصف --');
             populateSelect('weeklyScheduleClass', window.allClasses, '-- اختر الصف --');
             populateSelect('weeklyScheduleSection', window.allSections, '-- اختر الشعبة --');
-            
             populateSelect('reportClassSelect', window.allClasses, '-- اختر الصف --');
-            populateSelect('reportSectionSelect', window.allSections, '-- اختر الشعبة --');
-
-            const reportClassEl = document.getElementById('reportClassSelect');
-            if (reportClassEl) {
-                reportClassEl.onchange = () => {
-                    const cls = reportClassEl.value;
-                    const s = window.academicStructure;
-                    let sections = window.allSections;
-                    if (cls && s && s.classSections && s.classSections[cls]) {
-                        sections = s.classSections[cls];
-                    }
-                    populateSelect('reportSectionSelect', sections, '-- اختر الشعبة --');
-                };
-            }
+            populateSelect('reportSectionSelect', window.allSections, '-- اختر الشعب --');
 
             populateSelect('masterClass', window.allClasses, '-- اختر الصف أولاً --');
             const masterUploadInputAdmin = document.getElementById('masterExcelUploadInput');
@@ -1104,10 +1518,8 @@ function handleAdminPage() {
             
             buildWeeklyScheduleGrid(window.allSubjects);
             addExamDayField();
-        } else {
-            console.error("فشل جلب الهيكلية:", result.message);
         }
-    }).catch(err => console.error("خطأ في جلب البيانات الأساسية:", err));
+    });
 
     document.getElementById('announcementForm').addEventListener('submit', handleAnnouncementSubmit);
     document.getElementById('addExamDayBtn').addEventListener('click', addExamDayField);
@@ -1131,7 +1543,85 @@ function handleAdminPage() {
     document.getElementById('summaryStartDate').valueAsDate = new Date();
     document.getElementById('summaryEndDate').valueAsDate = new Date();
 
+    // (جديد) تفعيل ميزة البحث الذكي عن الطالب
+    setupStudentSearch();
+
     loadAdminObjections();
+    
+    // (جديد) تحميل قائمة النسخ المحفوظة للجدول الذكي
+    loadSmartVersionsMenu();
+}
+
+function setupStudentSearch() {
+    const searchInput = document.getElementById('summaryStudentSearch');
+    const hiddenIdInput = document.getElementById('summaryStudentId');
+    const resultsDiv = document.getElementById('studentSearchResults');
+
+    if (!searchInput || !resultsDiv) return;
+
+    searchInput.addEventListener('input', function() {
+        const query = this.value.trim();
+        resultsDiv.innerHTML = '';
+        
+        if (query === '') {
+            resultsDiv.style.display = 'none';
+            hiddenIdInput.value = '';
+            return;
+        }
+
+        if (!window.allStudentsList || window.allStudentsList.length === 0) {
+            resultsDiv.innerHTML = '<div style="padding: 10px; color: red;">الرجاء الانتظار، جاري تحميل بيانات الطلاب في الخلفية...</div>';
+            resultsDiv.style.display = 'block';
+            return;
+        }
+
+        // دالة لتوحيد النصوص العربية (تجاهل الهمزات والتاء المربوطة)
+        const normalizeArabic = (text) => {
+            if (!text) return '';
+            return text.replace(/[أإآا]/g, 'ا').replace(/ة/g, 'ه').replace(/ى/g, 'ي');
+        };
+
+        const queryNorm = normalizeArabic(query);
+        
+        const matchedStudents = window.allStudentsList.filter(s => {
+            const nameNorm = normalizeArabic(s.fullName);
+            // البحث بالاسم أو بـ ID الطالب
+            return nameNorm.includes(queryNorm) || (s.userId && s.userId.toLowerCase().includes(query.toLowerCase()));
+        });
+
+        if (matchedStudents.length === 0) {
+            resultsDiv.innerHTML = '<div style="padding: 10px; color: #888;">لم يتم العثور على طالب يطابق بحثك.</div>';
+            resultsDiv.style.display = 'block';
+            return;
+        }
+
+        matchedStudents.forEach(student => {
+            const div = document.createElement('div');
+            div.style.padding = '10px';
+            div.style.borderBottom = '1px solid #eee';
+            div.style.cursor = 'pointer';
+            div.innerHTML = `<strong>${student.fullName}</strong> <small style="color:#888;">(${student.class} - شعبة ${student.section})</small>`;
+            
+            div.addEventListener('mouseover', () => div.style.backgroundColor = '#f0f8ff');
+            div.addEventListener('mouseout', () => div.style.backgroundColor = 'transparent');
+            
+            div.addEventListener('click', () => {
+                searchInput.value = student.fullName;
+                hiddenIdInput.value = student.userId; 
+                resultsDiv.style.display = 'none';
+            });
+            
+            resultsDiv.appendChild(div);
+        });
+        
+        resultsDiv.style.display = 'block';
+    });
+
+    document.addEventListener('click', function(e) {
+        if (e.target !== searchInput && e.target !== resultsDiv) {
+            resultsDiv.style.display = 'none';
+        }
+    });
 }
 
 async function loadAdminObjections() {
@@ -1362,18 +1852,25 @@ async function loadPendingLibraryLinks() {
 
 async function loadMissingSubmissions() {
     const container = document.getElementById('missingSubmissionsContainer');
-    container.style.display = 'block';
-    container.innerHTML = '<p>جاري تحليل جداول آخر 7 أيام... الرجاء الانتظار.</p>';
+    
+    // إظهار نافذة تحميل منعت التفاعل لحين اكتمال التحليل
+    Swal.fire({ title: 'جاري تحليل الجداول...', text: 'الرجاء الانتظار، يتم فحص سجلات آخر 7 أيام.', allowOutsideClick: false, didOpen: () => { Swal.showLoading(); } });
     
     const result = await callApi('getMissingSubmissions');
+    
     if (!result.success) {
-        container.innerHTML = `<p>خطأ: ${result.message}</p>`;
+        Swal.close();
+        container.style.display = 'block';
+        container.innerHTML = `<p style="color:red; font-weight:bold;">خطأ: ${result.message}</p>`;
         return;
     }
     
+    Swal.close();
+    container.style.display = 'block';
+    
     const report = result.report;
     if (Object.keys(report).length === 0) {
-        container.innerHTML = '<p>ممتاز! جميع المدرسين ملتزمون بإرسال الواجبات والتقييمات لآخر 7 أيام.</p>';
+        container.innerHTML = '<p style="color:green; font-weight:bold;">ممتاز! جميع المدرسين ملتزمون بإرسال الواجبات والتقييمات لآخر 7 أيام.</p>';
         return;
     }
     
@@ -1423,21 +1920,31 @@ async function getStudentEvaluationSummary() {
         startDate: document.getElementById('summaryStartDate').value,
         endDate: document.getElementById('summaryEndDate').value,
     };
-    if (!payload.studentId || !payload.startDate || !payload.endDate) {
-        return alert('الرجاء إدخال ID الطالب وتحديد فترة زمنية.');
+    
+    // التحقق من أن المستخدم اختار الطالب من القائمة (الـ ID موجود)
+    if (!payload.studentId) {
+        return alert('الرجاء البحث عن اسم الطالب واختياره من القائمة المنسدلة.');
+    }
+    if (!payload.startDate || !payload.endDate) {
+        return alert('الرجاء تحديد فترة زمنية.');
     }
     
+    // إظهار نافذة تحميل
+    Swal.fire({ title: 'جاري جلب الخلاصة...', allowOutsideClick: false, didOpen: () => { Swal.showLoading(); } });
+
     const result = await callApi('getStudentEvaluationSummary', payload);
     const container = document.getElementById('summaryReportContainer');
     const textArea = document.getElementById('summaryText');
     
     if (result.success) {
+        Swal.close();
         container.style.display = 'block';
         textArea.value = result.summaryText; 
     } else {
+        Swal.close();
         container.style.display = 'none';
         textArea.value = '';
-        alert(result.message); 
+        Swal.fire('تنبيه', result.message, 'warning');
     }
 }
 
@@ -1455,52 +1962,111 @@ async function sendSummaryToTelegram() {
 }
 
 async function getGradesReportBySection() {
-    const payload = {
-        studentClass: document.getElementById('reportClassSelect').value,
-        studentSection: document.getElementById('reportSectionSelect').value
-    };
-    if (!payload.studentClass || !payload.studentSection) {
+    const studentClass = document.getElementById('reportClassSelect').value;
+    const studentSection = document.getElementById('reportSectionSelect').value;
+    
+    if (!studentClass || !studentSection) {
         return alert('الرجاء اختيار الصف والشعبة.');
     }
-    
-    const result = await callApi('getGradesReportBySection', payload);
+
+    const selectedTypes = Array.from(document.querySelectorAll('.report-col-cb:checked')).map(cb => cb.value);
+    if (selectedTypes.length === 0) return alert('يجب اختيار نوع درجة واحد على الأقل للعرض.');
+
+    Swal.fire({ title: 'جاري جلب وتحليل البيانات...', allowOutsideClick: false, didOpen: () => { Swal.showLoading(); } });
+
+    const result = await callApi('getGradesReportBySection', { studentClass, studentSection });
     const container = document.getElementById('gradesReportContainer');
     
     if (result.success && result.report.length > 0) {
-        const allSubjects = new Set();
-        result.report.forEach(student => {
-            Object.keys(student.grades).forEach(subject => allSubjects.add(subject));
-        });
-        const subjectsArray = Array.from(allSubjects);
+        Swal.close();
         
+        // جلب قائمة المواد الصحيحة من الهيكلية
+        let subjectsArray = [];
+        if (window.academicStructure && window.academicStructure.classSubjects && window.academicStructure.classSubjects[studentClass]) {
+            subjectsArray = window.academicStructure.classSubjects[studentClass];
+        } else {
+            const allSubj = new Set();
+            result.report.forEach(s => Object.keys(s.grades).forEach(subj => allSubj.add(subj)));
+            subjectsArray = Array.from(allSubj);
+        }
+
+        // فصل خيارات الحساب التراكمي (المجموع والمعدل) لتعرض في نهاية الجدول
+        const extraCalcTypes = selectedTypes.filter(t => t === 'Total_Effort' || t === 'Avg_Effort');
+        const coreGradeTypes = selectedTypes.filter(t => t !== 'Total_Effort' && t !== 'Avg_Effort');
+
         let html = `<table class="data-table"><thead><tr><th>اسم الطالب</th>`;
+        
+        // هيدر المواد
         subjectsArray.forEach(subject => {
-            html += `<th colspan="6">${subject}</th>`;
+            html += `<th colspan="${coreGradeTypes.length}">${subject}</th>`;
         });
+        
+        // هيدر الحسابات الإضافية في النهاية
+        if (extraCalcTypes.length > 0) {
+            html += `<th colspan="${extraCalcTypes.length}" style="background: #fff3cd; color: #856404;">النتائج السنوية التراكمية</th>`;
+        }
+        
         html += `</tr><tr><th></th>`;
-        subjectsArray.forEach(subject => {
-            html += `<th>ش1 ف1</th><th>ش2 ف1</th><th>نصف سنة</th><th>ش1 ف2</th><th>ش2 ف2</th><th>نهائي</th>`;
+        
+        // هيدر أنواع الدرجات لكل مادة
+        subjectsArray.forEach(() => {
+            coreGradeTypes.forEach(type => {
+                html += `<th style="font-size: 0.8em;">${ARABIC_GRADE_MAP[type] || type}</th>`;
+            });
         });
+        
+        // هيدر أنواع الحسابات الإضافية
+        extraCalcTypes.forEach(type => {
+            const label = type === 'Total_Effort' ? 'مجموع السعي' : 'معدل السعي';
+            html += `<th style="background: #fff3cd; color: #856404;">${label}</th>`;
+        });
+
         html += `</tr></thead><tbody>`;
 
         result.report.forEach(student => {
-            html += `<tr><td>${student.studentName}</td>`;
+            html += `<tr><td style="font-weight:bold; position: sticky; right: 0; background: #fff; z-index: 1;">${student.studentName}</td>`;
+            
+            let totalEffortSum = 0;
+            let subjectCount = subjectsArray.length;
+
+            // عرض درجات المواد وحساب المجموع
             subjectsArray.forEach(subject => {
-                const gradeData = student.grades[subject] || {};
-                html += `
-                    <td>${gradeData.Term1_Month1 || '-'}</td><td>${gradeData.Term1_Month2 || '-'}</td>
-                    <td>${gradeData.MidYear_Exam || '-'}</td><td>${gradeData.Term2_Month1 || '-'}</td>
-                    <td>${gradeData.Term2_Month2 || '-'}</td><td>${gradeData.Final_Exam || '-'}</td>
-                `;
+                const studentGrades = student.grades[subject] || {};
+                
+                // حساب السعي السنوي للمجموع (إذا لم يوجد نعتبره 0)
+                const effortVal = parseFloat(studentGrades['Yearly_Effort']) || 0;
+                totalEffortSum += effortVal;
+
+                coreGradeTypes.forEach(type => {
+                    const val = studentGrades[type];
+                    const style = (type.includes('Avg') || type.includes('Result') || type.includes('Effort')) ? 'style="background:#eafaf1; font-weight:bold;"' : '';
+                    html += `<td ${style}>${val !== undefined ? val : '0'}</td>`;
+                });
             });
+
+            // عرض أعمدة المجموع والمعدل في نهاية الصف
+            extraCalcTypes.forEach(type => {
+                if (type === 'Total_Effort') {
+                    html += `<td style="background: #fff3cd; font-weight: bold; color: #d63384;">${totalEffortSum.toFixed(1)}</td>`;
+                } else if (type === 'Avg_Effort') {
+                    const avg = subjectCount > 0 ? (totalEffortSum / subjectCount) : 0;
+                    html += `<td style="background: #fff3cd; font-weight: bold; color: #d63384;">${avg.toFixed(2)}</td>`;
+                }
+            });
+
             html += `</tr>`;
         });
         
         html += '</tbody></table>';
         container.innerHTML = html;
     } else {
-        container.innerHTML = '<p>لا توجد درجات معتمدة لعرضها لهذه الشعبة.</p>';
+        Swal.close();
+        container.innerHTML = '<p style="color:#888;">لا توجد درجات معتمدة لعرضها.</p>';
     }
+}
+// (جديد) دالة التحديد/إلغاء التحديد للكل في التقارير
+function toggleAllReportCols(status) {
+    document.querySelectorAll('.report-col-cb').forEach(cb => cb.checked = status);
 }
 
 async function loadSubmissionStatusReport(sheetName, containerId) {
@@ -1623,6 +2189,9 @@ async function loadAllUsers() {
     const result = await callApi('getAllUsers');
     const container = document.getElementById('usersContainer');
     if (result.success) {
+        // (جديد) حفظ قائمة الطلاب للبحث الذكي السريع
+        window.allStudentsList = result.users.filter(u => u.role === 'طالب');
+
         let html = `<div class="table-responsive"><table class="data-table">
             <thead><tr><th>الصورة</th><th>ID</th><th>الاسم/الدور</th><th>الصف/الشعبة</th><th>الحالة</th><th>صلاحية الغياب</th><th>صلاحية الإكسل</th><th>الإجراءات</th></tr></thead><tbody>`;
         
@@ -2080,6 +2649,7 @@ async function downloadMasterExcel() {
     
     if (!studentClass) return alert('الرجاء تحديد الصف أولاً.');
 
+    // (إصلاح) إذا كان الحقل فارغاً، نعتبره "الكل" 
     if (!studentSection) studentSection = 'الكل';
 
     const selectedSubjects = Array.from(document.querySelectorAll('.master-subject-cb:checked')).map(cb => cb.value);
@@ -2133,7 +2703,6 @@ async function downloadMasterExcel() {
     XLSX.writeFile(wb, `الشيت_الشامل_${studentClass}_${studentSection}.xlsx`);
     Swal.close();
 }
-
 async function handleMasterExcelUpload(e) {
     const file = e.target.files[0];
     if (!file) return;
@@ -2265,6 +2834,7 @@ function removeStructureItem(type, item) {
     }
 }
 
+// (جديد) دالة عرض الشعب والمواد للترتيب
 function renderClassMapping() {
     const selectedClass = document.getElementById('classMapperSelect').value;
     const container = document.getElementById('classMappingContainer');
@@ -2284,6 +2854,7 @@ function renderClassMapping() {
     const mySections = s.classSections[selectedClass];
     const mySubjects = s.classSubjects[selectedClass];
 
+    // عرض الشعب
     secContainer.innerHTML = s.sections.map(sec => {
         const isChecked = mySections.includes(sec) ? 'checked' : '';
         return `<label style="padding: 5px 10px; background: ${isChecked?'#eafaf1':'#f8f9fa'}; border: 1px solid #ddd; border-radius: 4px; cursor:pointer;">
@@ -2291,7 +2862,9 @@ function renderClassMapping() {
         </label>`;
     }).join('');
 
+    // عرض المواد مع الترتيب
     let subjHtml = '';
+    // المواد المختارة (بالترتيب)
     mySubjects.forEach((subj, idx) => {
         subjHtml += `<div style="display:flex; align-items:center; gap:5px; padding: 5px; background: #eafaf1; border: 1px solid #28a745; border-radius: 4px;">
             <input type="checkbox" checked onchange="removeClassSubject('${selectedClass}', '${subj}')">
@@ -2299,6 +2872,7 @@ function renderClassMapping() {
             <input type="number" value="${idx + 1}" onchange="changeSubjectOrder('${selectedClass}', '${subj}', this.value)" style="width:50px; padding:2px; text-align:center; border:1px solid #28a745;" title="تغيير التسلسل">
         </div>`;
     });
+    // المواد غير المختارة
     s.globalSubjects.forEach(subj => {
         if(!mySubjects.includes(subj)) {
             subjHtml += `<div style="display:flex; align-items:center; gap:5px; padding: 5px; background: #f8f9fa; border: 1px solid #ddd; border-radius: 4px;">
@@ -2332,6 +2906,7 @@ function changeSubjectOrder(className, subject, newOrderStr) {
     let arr = window.academicStructure.classSubjects[className];
     const currentIndex = arr.indexOf(subject);
     if(currentIndex > -1 && newOrder >= 0 && newOrder < arr.length) {
+        // إزالة المادة من مكانها القديم ووضعها في المكان الجديد
         arr.splice(currentIndex, 1);
         arr.splice(newOrder, 0, subject);
         window.academicStructure.classSubjects[className] = arr;
@@ -2348,8 +2923,60 @@ async function saveAcademicStructure() {
     }
 }
 
+function renderClassSubjectMapping() {
+    const selectedClass = document.getElementById('classSubjectMapper').value;
+    const container = document.getElementById('classSubjectMappingContainer');
+    if(!selectedClass) { container.innerHTML = '<p style="color: #888;">الرجاء اختيار صف لعرض المواد...</p>'; return; }
+    
+    const s = window.academicStructure;
+    if(!s.classSubjects[selectedClass]) s.classSubjects[selectedClass] = [...s.globalSubjects];
+    
+    const classSubjs = s.classSubjects[selectedClass];
+    
+    container.innerHTML = s.globalSubjects.map(subj => {
+        const isChecked = classSubjs.includes(subj) ? 'checked' : '';
+        return `<label style="padding: 10px; border: 1px solid #eee; border-radius: 5px; background: ${isChecked?'#eafaf1':'#fff'}; cursor:pointer;">
+            <input type="checkbox" value="${subj}" onchange="toggleSubjectForClass('${selectedClass}', '${subj}', this.checked)" ${isChecked}> ${subj}
+        </label>`;
+    }).join('');
+}
+
+function toggleSubjectForClass(className, subject, isChecked) {
+    let arr = window.academicStructure.classSubjects[className] || [];
+    if(isChecked && !arr.includes(subject)) arr.push(subject);
+    else if(!isChecked) arr = arr.filter(s => s !== subject);
+    window.academicStructure.classSubjects[className] = arr;
+    renderClassSubjectMapping();
+}
+
+async function saveAcademicStructure() {
+    Swal.fire({ title: 'جاري الحفظ...', allowOutsideClick: false, didOpen: () => { Swal.showLoading(); } });
+    const res = await callApi('updateSchoolStructure', { structure: window.academicStructure });
+    if(res.success) {
+        Swal.fire('نجاح', res.message, 'success');
+        setTimeout(() => location.reload(), 1500);
+    }
+}
+
 let currentEditingTeacherId = null;
 let currentTeacherAssignments = [];
+
+function renderModalDaysGrid(availability) {
+    const grid = document.getElementById('modalDaysGrid');
+    if (!grid) return;
+    const days = ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس'];
+    let html = '';
+    days.forEach(day => {
+        html += `<div style="border: 1px solid #ccc; padding: 5px; border-radius: 4px; background: #fff; min-width: 140px;">
+                    <strong>${day}:</strong><br>
+                    ${[1,2,3,4,5,6].map(p => {
+                        const isChecked = availability ? (availability[day] && availability[day].includes(p)) : true;
+                        return `<label style="font-size:0.85em; margin-left:3px;"><input type="checkbox" class="modal-period-cb" data-day="${day}" value="${p}" ${isChecked ? 'checked' : ''}> د${p}</label>`;
+                    }).join(' ')}
+                 </div>`;
+    });
+    grid.innerHTML = html;
+}
 
 async function openTeacherAssignments(teacherId, teacherName) {
     currentEditingTeacherId = teacherId;
@@ -2360,29 +2987,23 @@ async function openTeacherAssignments(teacherId, teacherName) {
     populateSelect('assignClass', s.classes, '-- اختر الصف --');
     populateSelect('assignSection', ['الكل', ...s.sections], '-- اختر الشعبة --');
     
-    document.getElementById('currentAssignmentsTable').querySelector('tbody').innerHTML = '<tr><td colspan="4">جاري التحميل...</td></tr>';
+    document.getElementById('currentAssignmentsTable').querySelector('tbody').innerHTML = '<tr><td colspan="5">جاري التحميل...</td></tr>';
     
+    // جلب المهام بالإضافة إلى قيود الجدول
     const res = await callApi('getTeacherAssignmentsAdmin', { teacherId });
     if(res.success) {
         currentTeacherAssignments = res.assignments;
+        document.getElementById('modalMaxPeriods').value = res.constraints ? res.constraints.maxPeriods : 20;
+        renderModalDaysGrid(res.constraints ? res.constraints.availability : null);
         renderTeacherAssignmentsTable();
     }
-}
-
-function updateAssignSubjects() {
-    const selectedClass = document.getElementById('assignClass').value;
-    const s = window.academicStructure;
-    const availableSubjects = s.classSubjects[selectedClass] || s.globalSubjects;
-    const availableSections = s.classSections[selectedClass] || s.sections;
-    
-    populateSelect('assignSubject', availableSubjects, '-- اختر المادة --');
-    populateSelect('assignSection', ['الكل', ...availableSections], '-- اختر الشعبة --');
 }
 
 function addTeacherAssignmentRow() {
     const cls = document.getElementById('assignClass').value;
     const sec = document.getElementById('assignSection').value;
     const sub = document.getElementById('assignSubject').value;
+    const periods = parseInt(document.getElementById('assignPeriods').value) || 2;
     
     if(!cls || !sec || !sub) return alert('الرجاء اختيار الصف والشعبة والمادة.');
     
@@ -2400,7 +3021,8 @@ function addTeacherAssignmentRow() {
     sectionsToAdd.forEach(sectionName => {
         const exists = currentTeacherAssignments.some(a => a.class === cls && a.section === sectionName && a.subject === sub);
         if(!exists) {
-            currentTeacherAssignments.push({ class: cls, section: sectionName, subject: sub });
+            // إضافة عدد الحصص للمهمة
+            currentTeacherAssignments.push({ class: cls, section: sectionName, subject: sub, periods: periods });
             addedAny = true;
         }
     });
@@ -2418,12 +3040,12 @@ function removeTeacherAssignment(index) {
 function renderTeacherAssignmentsTable() {
     const tbody = document.getElementById('currentAssignmentsTable').querySelector('tbody');
     if(currentTeacherAssignments.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="4" style="color:#888;">لا توجد مهام مسندة.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="5" style="color:#888;">لا توجد مهام مسندة.</td></tr>';
         return;
     }
     tbody.innerHTML = currentTeacherAssignments.map((a, idx) => `
         <tr>
-            <td>${a.class}</td><td>${a.section}</td><td>${a.subject}</td>
+            <td>${a.class}</td><td>${a.section}</td><td>${a.subject}</td><td style="font-weight:bold; color:#dc3545;">${a.periods || 2} حصص</td>
             <td><button onclick="removeTeacherAssignment(${idx})" class="button btn-reject" style="padding: 5px; font-size: 0.8em;"><i class="fas fa-trash"></i> حذف</button></td>
         </tr>
     `).join('');
@@ -2431,78 +3053,31 @@ function renderTeacherAssignmentsTable() {
 
 async function saveTeacherAssignments() {
     Swal.fire({ title: 'جاري الحفظ...', allowOutsideClick: false, didOpen: () => { Swal.showLoading(); } });
+    
+    // تجميع أوقات التواجد
+    let availability = {};
+    const days = ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس'];
+    days.forEach(d => availability[d] = []);
+    document.querySelectorAll('.modal-period-cb:checked').forEach(cb => {
+        availability[cb.dataset.day].push(parseInt(cb.value));
+    });
+
+    const constraints = {
+        maxPeriods: parseInt(document.getElementById('modalMaxPeriods').value) || 20,
+        availability: availability
+    };
+
     const payload = {
         teacherId: currentEditingTeacherId,
         teacherName: document.getElementById('modalTeacherName').textContent,
-        assignments: currentTeacherAssignments
+        assignments: currentTeacherAssignments,
+        constraints: constraints
     };
+
     const res = await callApi('saveTeacherAssignmentsAdmin', payload);
     if(res.success) {
         Swal.fire('نجاح', res.message, 'success');
         document.getElementById('teacherAssignmentsModal').style.display = 'none';
-    }
-}
-
-// ==========================================================
-//               فلترة القوائم المترابطة (للمدرس)
-// ==========================================================
-function updateTeacherFilters(prefix) {
-    try {
-        const classSelect = document.getElementById(`${prefix}Classes`);
-        const sectionSelect = document.getElementById(`${prefix}Sections`);
-        const subjectSelect = document.getElementById(`${prefix}Subjects`);
-
-        if (!classSelect) return;
-
-        const selectedClass = classSelect.value ? String(classSelect.value).trim() : '';
-        const assignments = window.teacherRawAssignments || [];
-        const s = window.academicStructure || {};
-        
-        if (!selectedClass || selectedClass === '-- اختر الصف --' || selectedClass === '') {
-            if (sectionSelect) sectionSelect.innerHTML = '<option value="">-- اختر الصف أولاً --</option>';
-            if (subjectSelect) subjectSelect.innerHTML = '<option value="">-- اختر الصف أولاً --</option>';
-            return;
-        }
-
-        const classAssignments = assignments.filter(a => a.class && String(a.class).trim() === selectedClass);
-
-        if (sectionSelect) {
-            let assignedSections = [...new Set(classAssignments.map(a => a.section ? String(a.section).trim() : ''))].filter(sec => sec !== '');
-            
-            let hasAll = assignedSections.includes('الكل');
-            
-            if (hasAll) {
-                if (s.classSections && s.classSections[selectedClass] && s.classSections[selectedClass].length > 0) {
-                    assignedSections = s.classSections[selectedClass];
-                } else if (s.sections && s.sections.length > 0) {
-                    assignedSections = s.sections;
-                }
-            }
-            
-            let secOptions = '';
-            if (Array.isArray(assignedSections)) {
-                assignedSections.forEach(sec => {
-                    if (sec && sec !== 'الكل') secOptions += `<option value="${sec}">${sec}</option>`;
-                });
-            }
-            
-            if(hasAll || assignedSections.length > 1) {
-                secOptions = '<option value="الكل">جميع الشعب</option>' + secOptions;
-            }
-
-            sectionSelect.innerHTML = secOptions || '<option value="">لا توجد شعب مسندة</option>';
-        }
-
-        if (subjectSelect) {
-            const subjects = [...new Set(classAssignments.map(a => a.subject ? String(a.subject).trim() : ''))].filter(sub => sub !== '');
-            let subOptions = '';
-            subjects.forEach(sub => {
-                if (sub) subOptions += `<option value="${sub}">${sub}</option>`;
-            });
-            subjectSelect.innerHTML = subOptions || '<option value="">لا توجد مواد مسندة</option>';
-        }
-    } catch (e) {
-        console.error('Error filtering dropdowns:', e);
     }
 }
 
@@ -2540,6 +3115,7 @@ function updateMasterExcelFilters() {
             availableSubjects = window.allSubjects || [];
         }
         
+        // (إصلاح): الاعتماد على الشعب المخصصة للصف بدلاً من كل الشعب
         if (s && s.classSections && s.classSections[selectedClass]) {
              availableSections = s.classSections[selectedClass];
         } else {
@@ -2561,5 +3137,55 @@ function updateMasterExcelFilters() {
         ).join('');
     } else {
         subjContainer.innerHTML = '<p style="color:red;">لا توجد مواد مخصصة لهذا الصف.</p>';
+    }
+}
+
+// دالة تحديث قائمة الشعب في نافذة مهام المدرس
+function updateAssignSubjects() {
+    const selectedClass = document.getElementById('assignClass').value;
+    const s = window.academicStructure;
+    const availableSubjects = s.classSubjects[selectedClass] || s.globalSubjects;
+    const availableSections = s.classSections[selectedClass] || s.sections;
+    
+    populateSelect('assignSubject', availableSubjects, '-- اختر المادة --');
+    populateSelect('assignSection', ['الكل', ...availableSections], '-- اختر الشعبة --');
+}
+
+// ==========================================================
+//               فلترة القوائم المترابطة (للمدرس)
+// ==========================================================
+function updateTeacherFilters(prefix) {
+    const classSelect = document.getElementById(`${prefix}Classes`);
+    const sectionSelect = document.getElementById(`${prefix}Sections`);
+    const subjectSelect = document.getElementById(`${prefix}Subjects`);
+
+    const selectedClass = classSelect ? classSelect.value : null;
+    const assignments = window.teacherRawAssignments || [];
+    
+    if (!selectedClass) {
+        if (sectionSelect) sectionSelect.innerHTML = '<option value="">-- اختر الصف أولاً --</option>';
+        if (subjectSelect) subjectSelect.innerHTML = '<option value="">-- اختر الصف أولاً --</option>';
+        return;
+    }
+
+    // جلب المهام المرتبطة بهذا الصف فقط
+    const classAssignments = assignments.filter(a => a.class === selectedClass);
+
+    if (sectionSelect) {
+        const sections = [...new Set(classAssignments.map(a => a.section))];
+        let secOptions = '<option value="الكل">جميع الشعب</option>';
+        sections.forEach(sec => {
+            if (sec !== 'الكل') secOptions += `<option value="${sec}">${sec}</option>`;
+        });
+        sectionSelect.innerHTML = secOptions;
+    }
+
+    if (subjectSelect) {
+        const subjects = [...new Set(classAssignments.map(a => a.subject))];
+        let subOptions = '';
+        subjects.forEach(sub => {
+            subOptions += `<option value="${sub}">${sub}</option>`;
+        });
+        subjectSelect.innerHTML = subOptions || '<option value="">لا توجد مواد مسندة</option>';
     }
 }
